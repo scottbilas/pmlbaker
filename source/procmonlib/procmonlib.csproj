@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net472</TargetFramework>
+        <LangVersion>default</LangVersion>
+        <Nullable>enable</Nullable>
+        <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <PackageReference Include="DebugHelp" Version="0.4.3" />
+    </ItemGroup>
+
+</Project>
