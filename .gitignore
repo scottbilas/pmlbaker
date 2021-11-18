@@ -1,0 +1,7 @@
+.idea/
+debug/
+bin/
+obj/
+
+# keep this way until i get around to making a publishable set
+/testdata/
