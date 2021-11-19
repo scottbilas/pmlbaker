@@ -5,6 +5,9 @@ using System.IO;
 using System.Linq;
 using System.Text;
 
+// PML format: https://github.com/eronnen/procmon-parser/blob/master/docs/PML%20Format.md
+// consts.py: https://github.com/eronnen/procmon-parser/blob/master/procmon_parser/consts.py
+    
 namespace ProcMonUtils
 {
     [DebuggerDisplay("{ProcessName}")]
@@ -54,8 +57,17 @@ namespace ProcMonUtils
         public int FrameCount;
     }
 
-    // see https://github.com/eronnen/procmon-parser/blob/master/docs/PML%20Format.md for reverse-engineered format
-
+    // from consts.py
+    public enum PmlEventClass
+    {
+        Unknown = 0,
+        Process = 1,
+        Registry = 2,
+        FileSystem = 3,
+        Profiling = 4,
+        Network = 5,
+    }
+    
     public class PmlReader : IDisposable
     {
         BinaryReader m_Reader;
@@ -94,9 +106,15 @@ namespace ProcMonUtils
                 0x208); // The system root path (like "C:\Windows")
 
             m_EventCount = m_Reader.ReadUInt32();
+            
             SeekCurrent(8); // Unknown
             var eventsDataOffset = m_Reader.ReadUInt64();
             m_EventOffsetsOffset = m_Reader.ReadUInt64();
+
+            // don't pskill your procmon or it won't update the header; use /terminate instead
+            if (m_EventOffsetsOffset == 0)
+                throw new FileLoadException($"File was not closed cleanly during capture and is corrupt", pmlPath);
+            
             var processesOffset = m_Reader.ReadUInt64();
             var stringsOffset = m_Reader.ReadUInt64();
 
@@ -128,7 +146,7 @@ namespace ProcMonUtils
             return strings;
         }
         
-        void ReadProcessData(ulong  processesOffset)
+        void ReadProcessData(ulong processesOffset)
         {
             SeekBegin(processesOffset);
 
@@ -208,11 +226,12 @@ namespace ProcMonUtils
         }
         
         // one instance is created per call, then updated and yielded on each iteration  
-        public IEnumerable<PmlEventStack> SelectEventStacks()
+        public IEnumerable<PmlEventStack> SelectEventStacks(int startAtIndex = 0)
         {
-            var offsets = new UInt64[m_EventCount];
+            var offsets = new UInt64[m_EventCount - startAtIndex];
             SeekBegin(m_EventOffsetsOffset);
-            for (var ievent = 0; ievent < m_EventCount; ++ievent)
+            SeekCurrent(startAtIndex * 5);
+            for (var ievent = 0; ievent < offsets.Length; ++ievent)
             {
                 offsets[ievent] = m_Reader.ReadUInt32();
                 SeekCurrent(1); // Unknown flags
@@ -220,36 +239,42 @@ namespace ProcMonUtils
             
             var eventStack = new PmlEventStack();
             
-            for (; eventStack.EventIndex < m_EventCount; ++eventStack.EventIndex)
+            for (var ioffset = 0; ioffset < offsets.Length; ++ioffset)
             {
-                SeekBegin(offsets[eventStack.EventIndex]);
+                eventStack.EventIndex = ioffset + startAtIndex;
+                SeekBegin(offsets[ioffset]);
              
-                // below: consts.py is in https://github.com/eronnen/procmon-parser/blob/master/procmon_parser/consts.py 
+                var processIndex = m_Reader.ReadUInt32(); // The index to the process of the event.
+                SeekCurrent(4); // Thread Id.
+                var eventClass = (PmlEventClass)m_Reader.ReadUInt32();
+                
+                if (eventClass == PmlEventClass.FileSystem)
+                {
+                    eventStack.Process = m_ProcessesByPmlIndex[processIndex];
 
-                eventStack.Process = m_ProcessesByPmlIndex[m_Reader.ReadUInt32()];
-                
-                SeekCurrent(
-                    4 + // Thread Id.
-                    4 + // Event class - see class PmlEventClass(enum.IntEnum) in consts.py
-                    2 + // see ProcessOperation, RegistryOperation, NetworkOperation, FilesystemOperation in consts.py
-                    6 + // Unknown.
-                    8); // Duration of the operation in 100 nanoseconds interval.
+                    SeekCurrent(
+                        2 + // see ProcessOperation, RegistryOperation, NetworkOperation, FilesystemOperation in consts.py
+                        6 + // Unknown.
+                        8); // Duration of the operation in 100 nanoseconds interval.
 
-                eventStack.CaptureTime = (long)m_Reader.ReadUInt64(); // (FILETIME) The time when the event was captured.
-                
-                SeekCurrent(4); // The value of the event result.
-                
-                eventStack.FrameCount = m_Reader.ReadUInt16(); // The depth of the captured stack trace.
-                
-                SeekCurrent(
-                    2 + // Unknown
-                    4 + // The size of the specific detail structure (contains path and other details)
-                    4); // The offset from the start of the event to extra detail structure (not necessarily continuous with this structure).
+                    eventStack.CaptureTime = (long)m_Reader.ReadUInt64(); // (FILETIME) The time when the event was captured.
 
-                for (var iframe = 0; iframe < eventStack.FrameCount; ++iframe)
-                    eventStack.Frames[iframe] = m_Reader.ReadUInt64();
+                    SeekCurrent(4); // The value of the event result.
                 
-                yield return eventStack;
+                    eventStack.FrameCount = m_Reader.ReadUInt16(); // The depth of the captured stack trace.
+                    if (eventStack.FrameCount > 0)
+                    {
+                        SeekCurrent(
+                            2 + // Unknown
+                            4 + // The size of the specific detail structure (contains path and other details)
+                            4); // The offset from the start of the event to extra detail structure (not necessarily continuous with this structure).
+
+                        for (var iframe = 0; iframe < eventStack.FrameCount; ++iframe)
+                            eventStack.Frames[iframe] = m_Reader.ReadUInt64();
+                        
+                        yield return eventStack;
+                    }
+                }
             }
         }
 
