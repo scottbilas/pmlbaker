@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Diagnostics.CodeAnalysis;
 
 namespace ProcMonUtils
 {
@@ -22,11 +23,14 @@ namespace ProcMonUtils
     
     public static class AddressRangeExtensions
     {
-        public static T? FindAddressIn<T>(this T[] items, ulong address)
-            where T : class, IAddressRange
+        public static bool TryFindAddressIn<T>(this T[] items, ulong address, [NotNullWhen(returnValue: true)] out T? result)
+            where T : IAddressRange
         {
-            if (items.Length == 0 || address < items[0].AddressRef.Base || address >= items[items.Length - 1].AddressRef.End)
-                return null;
+            if (items.Length == 0 || address < items[0].AddressRef.Base || address >= items[^1].AddressRef.End)
+            {
+                result = default;
+                return false;
+            }
 
             for (ulong l = 0, h = (ulong)(items.Length - 1); l <= h; )
             {
@@ -38,9 +42,14 @@ namespace ProcMonUtils
                 else if (test.AddressRef.Base > address)
                     h = i - 1;
                 else
-                    return test;
+                {
+                    result = test;
+                    return true;
+                }
             }
-            return null;
+
+            result = default!;
+            return false;
         }
     }
 }

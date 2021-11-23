@@ -34,6 +34,8 @@ using System.Text;
 #pragma warning disable 8604
 #pragma warning disable 8618
 #pragma warning disable 8625
+#pragma warning disable 8765
+#pragma warning disable 8767
 
 namespace NiceIO
 {

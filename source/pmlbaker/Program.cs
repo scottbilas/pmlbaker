@@ -12,21 +12,28 @@ const string k_Usage = k_Name + @"
 Bake symbols out for stack frames from a Process Monitor PML (log) file
 
 Usage:
-  pmlbaker bake PML [PMIP]
+  pmlbaker bake [--debug] [--no-ntsymbolpath] PML
   pmlbaker query PMLBAKED QUERY...   
   pmlbaker (-h|--help)
   pmlbaker (-v|--version)
 
-  PML       path to the PML file to process; a .pmlbaked file will be written next to it
-  PMIP      path to the mono-jit log (pmip_<pid>_<did>.txt you copied from %TEMP%)
-  PMLBAKED  path to a .pmlbaked file (file extension optional) for running queries
+  PML       Path to the PML (Process Monitor Log) file to process. The folder
+            containing this file will also be used for:
 
-  QUERY     {int,datetime} print the stack for the matching event 
-            {regex}        print id's for events that match symbol or module name            
+              * Finding mono pmip jit log files (copy them here before Unity exits)
+              * Writing a .pmlbaked file with the same filename as PML with the
+                symbolicated data, to be used for a `query`.
+
+  PMLBAKED  Path to a .pmlbaked file (file extension optional) for running queries.
+
+  QUERY     {int,datetime} Print the stack for the matching event.
+            {regex}        Print ID's for events that match symbol or module name.            
 
 Options:
-  -h --help           Show this screen.
-  -v --version        Show version.
+  --debug            Write PMLBAKED in a more readable text debug format. (3-4x bigger)
+  --no-ntsymbolpath  Don't use env var _NT_SYMBOL_PATH.
+  -h --help          Show this screen.
+  -v --version       Show version.
 ";
 
 var docopt = new Docopt();
@@ -44,17 +51,24 @@ if (!parseOk)
 
 if (parsed["bake"].IsTrue)
 {
+    var noNtSymbolPath = parsed["--no-ntsymbolpath"].IsTrue;
+
+    if (!noNtSymbolPath && (Environment.GetEnvironmentVariable("_NT_SYMBOL_PATH")?.IndexOf("http") ?? -1) != -1)
+        Console.WriteLine("_NT_SYMBOL_PATH appears to be set to use a symbol server, which may slow down processing greatly..");  
+    
     var pmlPath = ((string)parsed["PML"].Value).ToNPath().FileMustExist();
-    var pmipPath = ((string?)parsed["PMIP"]?.Value)?.ToNPath()?.FileMustExist();
     var bakedFile = pmlPath.ChangeExtension(".pmlbaked");
 
     var iter = 0;
-    PmlUtils.Symbolicate(pmlPath, pmipPath?.ToString(), bakedFile, (_, total) =>
-    {
-        if (iter++ == 0)
-            Console.Write($"Writing {total} events to {bakedFile.MakeAbsolute()}...");
-        else if (iter % 10000 == 0) Console.Write(".");
-    });
+    PmlUtils.Symbolicate(pmlPath, new SymbolicateOptions {
+        DebugFormat = parsed["--debug"].IsTrue,
+        NoNtSymbolPath = noNtSymbolPath,
+        Progress = (_, total) =>
+        {
+            if (iter++ == 0)
+                Console.Write($"Writing {total} events to {bakedFile.MakeAbsolute()}...");
+            else if (iter % 10000 == 0) Console.Write(".");
+        }});
 
     Console.WriteLine("done!");
 }
@@ -72,7 +86,7 @@ else if (parsed["query"].IsTrue)
     {
         Console.WriteLine();
         Console.WriteLine("Sequence = " + eventRecord.Sequence);
-        Console.WriteLine("CaptureTime = " + eventRecord.CaptureTime.ToString(PmlUtils.k_CaptureTimeFormat));
+        Console.WriteLine("CaptureTime = " + eventRecord.CaptureTime.ToString(PmlUtils.CaptureTimeFormat));
         Console.WriteLine("PID = " + eventRecord.ProcessId);
 
         if (eventRecord.Frames.Length > 0)
@@ -107,7 +121,7 @@ else if (parsed["query"].IsTrue)
             if (eventRecord != null)
                 Dump(eventRecord.Value);
             else
-                Console.WriteLine("No event found matching " + captureTime.ToString(PmlUtils.k_CaptureTimeFormat));
+                Console.WriteLine("No event found matching " + captureTime.ToString(PmlUtils.CaptureTimeFormat));
         }
         else
         {

@@ -1,150 +1,245 @@
 ﻿using System;
-using System.Collections;
 using System.Collections.Generic;
-using System.ComponentModel;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
 using System.Text;
+using BetterWin32Errors;
 using DebugHelp;
+using NiceIO;
 
 namespace ProcMonUtils
 {
+    class SymCache : IDisposable
+    {
+        SimpleSymbolHandler m_SimpleSymbolHandler;
+        HashSet<string> m_SymbolsForModuleCache = new(StringComparer.OrdinalIgnoreCase);
+        Dictionary<ulong, (SymbolInfo symbol, ulong offset)> m_SymbolFromAddressCache = new();
+        MonoSymbolReader? m_MonoSymbolReader;
+        
+        public SymCache(SymbolicateOptions options) =>
+            m_SimpleSymbolHandler = new SimpleSymbolHandler(options.NoNtSymbolPath);
+
+        public void Dispose() => m_SimpleSymbolHandler.Dispose();
+
+        public void LoadSymbolsForModule(PmlModule module)
+        {
+            if (!m_SymbolsForModuleCache.Add(module.ImagePath))
+                return;
+            
+            var win32Error = m_SimpleSymbolHandler.LoadSymbolsForModule(module.ImagePath, module.Address.Base);
+            if (win32Error != Win32Error.ERROR_SUCCESS &&
+                win32Error != Win32Error.ERROR_PATH_NOT_FOUND &&
+                win32Error != Win32Error.ERROR_NO_MORE_FILES) // this can happen if a dll has been deleted since the PML was recorded
+                throw new Win32Exception(win32Error);
+        }
+        
+        public void LoadMonoSymbols(string monoPmipPath)
+        {
+            if (m_MonoSymbolReader != null)
+                throw new Exception("Multiple mono symbol sets not supported yet");
+            
+            m_MonoSymbolReader = new MonoSymbolReader(monoPmipPath);
+        }
+
+        public bool TryGetNativeSymbol(ulong address, out (SymbolInfo symbol, ulong offset) symOffset)
+        {
+            if (m_SymbolFromAddressCache.TryGetValue(address, out symOffset))
+                return true;
+
+            var win32Error = m_SimpleSymbolHandler.GetSymbolFromAddress(address, ref symOffset.symbol, out symOffset.offset);
+            switch (win32Error)
+            {
+                case Win32Error.ERROR_SUCCESS:
+                    m_SymbolFromAddressCache.Add(address, symOffset);
+                    return true;
+                case Win32Error.ERROR_INVALID_ADDRESS: // jetbrains fsnotifier.exe can cause this, wild guess that it happens with in-memory generated code
+                case Win32Error.ERROR_MOD_NOT_FOUND: // this can happen if a dll has been deleted since the PML was recorded
+                    return false;
+                default:
+                    throw new Win32Exception(win32Error);
+            }
+        }
+        
+        // sometimes can get addresses that seem like they're in the mono jit memory space, but don't actually match any symbols. why??
+        public bool TryGetMonoSymbol(ulong address, [NotNullWhen(returnValue: true)] out MonoJitSymbol? monoJitSymbol)
+        {
+            if (m_MonoSymbolReader != null)
+                return m_MonoSymbolReader.TryFindSymbol(address, out monoJitSymbol);
+            
+            monoJitSymbol = default!;
+            return false;
+        }
+    }
+
+    public struct SymbolicateOptions
+    {
+        public bool DebugFormat;        // defaults to string dictionary to compact the file and improve parsing speed a bit
+        public string[]? MonoPmipPaths; // defaults to looking for matching pmip's in pml folder 
+        public string? BakedPath;       // defaults to <pmlname>.pmlbaked
+        public Action<int, int>? Progress;
+        public bool NoNtSymbolPath;
+
+        public int StartAtEventIndex;
+        public int EventProcessCount; // 0 means "all remaining events" 
+    }
+    
     public static class PmlUtils
     {
-        // MISSING: support for domain reloads. pass in a timestamp to use (which would in non-test scenarios just come from
-        // a stat for create-time on the pmip file itself) and the symbolicator can use the event create time to figure out
-        // which pmip set to use.
-        // ALSO: probably want to support an automatic `dir $env:temp\pmip*.txt` -> MonoSymbolReader[] 
-        
-        // OPTZ: don't output events where there are no frames (requires reader to use EventCount and per-event index)
-        // OPTZ: use string indexing for compression and speed (symbol names replaced with atoms, table at bottom of file, use more compact easy parse txt representation inline)
-        
-        public const string k_CaptureTimeFormat = "hh:mm:ss.fffffff tt";
-        
+        public const string CaptureTimeFormat = "hh:mm:ss.fffffff tt";
+
         // the purpose of this function is to bake text symbols (for native and mono jit) so the data can be transferred
         // to another machine without needing the exact same binaries and pdb's.
-        public static int Symbolicate(string inPmlPath, string? inMonoPmipPath, string outFramesPath, Action<int, int>? progress = null) 
+        public static int Symbolicate(string inPmlPath, SymbolicateOptions options = default) 
         {
-            using var pmlReader = new PmlReader(inPmlPath);
+            // MISSING: support for domain reloads. pass in a timestamp to use (which would in non-test scenarios just come from
+            // a stat for create-time on the pmip file itself) and the symbolicator can use the event create time to figure out
+            // which pmip set to use.
 
-            MonoSymbolReader? monoSymbolReader = null;
-            PmlProcess? unityProcess = null;
-            
-            if (inMonoPmipPath != null)
+            var pmlPath = inPmlPath.ToNPath();
+            using var pmlReader = new PmlReader(pmlPath);
+
+            var symCacheDb = new Dictionary<uint /*pid*/, SymCache>();
+            var strings = new List<string>();
+            var stringDb = new Dictionary<string, int>();
+            var badChars = new[] { '\n', '\r', '\t' };
+
+            int ToStringIndex(string str)
             {
-                monoSymbolReader = new MonoSymbolReader(inMonoPmipPath);
-                unityProcess = pmlReader.FindProcessByProcessId(monoSymbolReader.UnityProcessId)
-                    ?? throw new FileLoadException($"Unity PID {monoSymbolReader.UnityProcessId} not found in PML processes", inMonoPmipPath);
+                if (!stringDb.TryGetValue(str, out var index))
+                {
+                    if (str.Length == 0)
+                        throw new ArgumentException("Shouldn't have an empty string here");
+                    if (str.IndexOfAny(badChars) != -1)
+                        throw new ArgumentException("String has bad chars in it");
+
+                    stringDb.Add(str, index = strings.Count);
+                    strings.Add(str);
+                }
+                
+                return index;
             }
             
-            var tmpFramesPath = outFramesPath + ".tmp";
-            using (var framesFile = File.CreateText(tmpFramesPath))
+            if (options.MonoPmipPaths != null)
             {
-                framesFile.Write("# EVENTS BEGIN\n");
-                framesFile.Write("#\n");
-                framesFile.Write($"# EventCount = {pmlReader.EventCount}\n");
-                framesFile.Write("# EventDoc = Sequence;Time of Day;PID;Frame[0];Frame[1];Frame[..n]\n");
-                framesFile.Write("# FrameDoc = $type [$module] $symbol + $offset (type: K=kernel, U=user, M=mono)\n");
-                framesFile.Write("#\n");
-                
-                using var dbghelp = DebugHelp.SymbolHandler.Create();
-                var loadedModules = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                var addressToSymbols = new Dictionary<ulong, (SymbolInfo s, ulong o)>();
-                var dupModuleDetect = new Dictionary<ulong, (PmlProcess p, PmlModule m)>();
+                foreach (var monoPmipPath in options.MonoPmipPaths)
+                {
+                    var (pid, _) = MonoSymbolReader.ParsePmipFilename(monoPmipPath);
+                    if (symCacheDb.ContainsKey((uint)pid))
+                        throw new Exception("Multiple mono domains not supported yet");
+                    
+                    var symCache = new SymCache(options);
+                    symCache.LoadMonoSymbols(monoPmipPath);
+                    symCacheDb.Add((uint)pid, symCache);
+                }
+            }
+
+            var bakedPath = options.BakedPath ?? pmlPath.ChangeExtension(".pmlbaked");
+            var tmpBakedPath = bakedPath + ".tmp";
+            using (var bakedFile = File.CreateText(tmpBakedPath))
+            {
+                bakedFile.Write("# EVENTS BEGIN\n");
+                bakedFile.Write("#\n");
+                bakedFile.Write($"# EventCount = {pmlReader.EventCount}\n");
+                bakedFile.Write($"# DebugFormat = {options.DebugFormat}\n");
+                bakedFile.Write("# EventDoc = Sequence;Time of Day;PID;Frame[0];Frame[1];Frame[..n]\n");
+                bakedFile.Write("# FrameDoc = $type [$module] $symbol + $offset (type: K=kernel, U=user, M=mono)\n");
+                bakedFile.Write("#\n");
                 
                 var sb = new StringBuilder();
-                foreach (var eventStack in pmlReader.SelectEventStacks())
+                var processIdFormat = options.DebugFormat ? "d" : "x";
+
+                var eventStacks = pmlReader.SelectEventStacks(options.StartAtEventIndex);
+                if (options.EventProcessCount > 0)
+                    eventStacks = eventStacks.Take(options.EventProcessCount);
+                
+                foreach (var eventStack in eventStacks)
                 {
+                    if (!symCacheDb.TryGetValue(eventStack.Process.ProcessId, out var symCache))
+                        symCacheDb.Add(eventStack.Process.ProcessId, symCache = new SymCache(options));                        
+                    
                     sb.Append(eventStack.EventIndex);
                     sb.Append(';');
-                    sb.AppendFormat("{0:" + k_CaptureTimeFormat + "}", DateTime.FromFileTime(eventStack.CaptureTime));
+                    if (options.DebugFormat)
+                        sb.Append(new DateTime(eventStack.CaptureTime).ToString(CaptureTimeFormat));
+                    else
+                        sb.AppendFormat("{0:x}", eventStack.CaptureTime);
                     sb.Append(';');
-                    sb.Append(eventStack.Process.ProcessId);
+                    sb.Append(eventStack.Process.ProcessId.ToString(processIdFormat));
                     sb.Append(';');
 
                     for (var iframe = 0; iframe < eventStack.FrameCount; ++iframe)
                     {
+                        var address = eventStack.Frames[iframe];
+
+                        if (eventStack.Process.TryFindModule(address, out var module))
+                        {
+                            try
+                            {
+                                symCache.LoadSymbolsForModule(module);
+                            }
+                            catch (Exception e)
+                            {
+                                throw new Exception($"Symbol lookup fail for {module.ImagePath} at 0x{address:X}", e);
+                            }
+                        }
+
+                        var type = (address & 1UL << 63) != 0 ? 'K' : 'U';
                         if (iframe != 0)
                             sb.Append(';');
-                        
-                        var address = eventStack.Frames[iframe];
-                        
-                        var type = (address & 1UL << 63) != 0 ? 'K' : 'U';
-                        
-                        var module = eventStack.Process.FindModule(address);
-                        var found = false;
-                        if (module != null)
-                        {
-                            if (loadedModules.Add(module.ImagePath))
-                            {
-                                // TODO: be able to handle separate processes that happen to load modules into overlapping address space..which
-                                // could cause multiple potential symbols to resolve for the same address. very slim chance of this i guess?
-                                // TODO: more than just base address is important to check..would ideally check the whole range..
-                                if (dupModuleDetect.TryGetValue(module.Address.Base, out var dupModule))
-                                    throw new Exception("Module collision!");
-                                dupModuleDetect.Add(module.Address.Base, (eventStack.Process, module));
 
-                                try
-                                {
-                                    dbghelp.LoadSymbolsForModule(module.ImagePath, module.Address.Base);
-                                    found = true;
-                                }
-                                catch (Exception e)
-                                {
-                                    throw new Exception($"Symbol lookup fail for {module.ImagePath} at 0x{address:X}", e);
-                                }
-                            }
-
-                            if (!addressToSymbols.TryGetValue(address, out var symbol))
-                            {
-                                try
-                                {
-                                    var symbolInfo = dbghelp.GetSymbolFromAddress(address, out var offset);
-                                    addressToSymbols.Add(address, (symbolInfo, offset));
-                                }
-                                catch (Win32Exception x) when((uint)x.ErrorCode == 0x80004005 /*E_FAIL*/ &&
-                                    (
-                                        x.Message.Contains("Attempt to access invalid address") ||
-                                        x.Message.Contains("The specified module could not be found")
-                                    ))
-                                {
-                                    // this_is_fine.gif
-                                }
-                            }
-                            
-                            if (found)
-                                sb.AppendFormat("{0} [{1}] {2} + 0x{3:x}", type, Path.GetFileName(module.ImagePath), symbol.s, symbol.o);
-                        }
-                        else if (eventStack.Process == unityProcess)
+                        if (module != null && symCache.TryGetNativeSymbol(address, out var nativeSymbol))
                         {
-                            // sometimes can get addresses that seem like they're in the mono jit memory space, but don't
-                            // actually match any symbols. don't know why.
-                            var monoJit = monoSymbolReader!.FindSymbol(address);
-                            if (monoJit != null)
-                            {
-                                sb.AppendFormat("M [{0}] {1} + 0x{2:x}", monoJit.AssemblyName, monoJit.Symbol, address - monoJit.Address.Base);
-                                found = true;
-                            }
+                            if (options.DebugFormat)
+                                sb.AppendFormat("{0} [{1}] {2} + 0x{3:x}", type, Path.GetFileName(module.ImagePath), nativeSymbol.symbol.Name, nativeSymbol.offset);
+                            else 
+                                sb.AppendFormat("{0},{1:x},{2:x},{3:x}", type, ToStringIndex(Path.GetFileName(module.ImagePath)), ToStringIndex(nativeSymbol.symbol.Name), nativeSymbol.offset);
                         }
-                        
-                        if (!found)
-                            sb.AppendFormat("{0} 0x{1:x}", type, address);
+                        else if (symCache.TryGetMonoSymbol(address, out var monoSymbol) && monoSymbol.AssemblyName != null && monoSymbol.Symbol != null)
+                        {
+                            if (options.DebugFormat)
+                                sb.AppendFormat("M [{0}] {1} + 0x{2:x}", monoSymbol.AssemblyName, monoSymbol.Symbol, address - monoSymbol.Address.Base);
+                            else
+                                sb.AppendFormat("M,{0:x},{1:x},{2:x}", ToStringIndex(monoSymbol.AssemblyName), ToStringIndex(monoSymbol.Symbol), address - monoSymbol.Address.Base);
+                        }
+                        else
+                            sb.AppendFormat("{0},{1:x}", type, address);
                     }
                     
                     sb.Append('\n');
-                    framesFile.Write(sb.ToString());
+                    bakedFile.Write(sb.ToString());
                     sb.Clear();
                     
-                    progress?.Invoke(eventStack.EventIndex, (int)pmlReader.EventCount);
+                    options.Progress?.Invoke(eventStack.EventIndex, (int)pmlReader.EventCount);
                 }
+
+                foreach (var cache in symCacheDb.Values)
+                    cache.Dispose();
+
+                bakedFile.Write("#\n");
+                bakedFile.Write("# EVENTS END\n");
+                bakedFile.Write("#\n");
                 
-                framesFile.Write("#\n");
-                framesFile.Write("# EVENTS END\n");
-                framesFile.Write("#\n");
+                if (strings.Count != 0)
+                {
+                    bakedFile.Write("#\n");
+                    bakedFile.Write("# STRINGS BEGIN\n");
+                    bakedFile.Write("#\n");
+
+                    foreach (var str in strings)
+                    {
+                        bakedFile.Write(str);
+                        bakedFile.Write('\n');
+                    }
+                
+                    bakedFile.Write("#\n");
+                    bakedFile.Write("# STRINGS END\n");
+                    bakedFile.Write("#\n");
+                }
             }
 
-            File.Delete(outFramesPath);
-            File.Move(tmpFramesPath, outFramesPath);
+            File.Delete(bakedPath);
+            File.Move(tmpBakedPath, bakedPath);
             
             return (int)pmlReader.EventCount;
         }

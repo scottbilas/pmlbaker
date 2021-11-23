@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -11,7 +12,8 @@ namespace ProcMonUtils
     {
         public AddressRange Address;
         
-        // mono pmip files sometimes have the symbol portion blank
+        // mono pmip files sometimes have the symbol portion blank, but we'll keep an entry anyway to track that there
+        // is indeed a jit related function there.
         public string? AssemblyName;
         public string? Symbol;
         
@@ -20,23 +22,17 @@ namespace ProcMonUtils
 
     public class MonoSymbolReader
     {
-        public uint UnityProcessId;
-        public DateTime DomainCreationTime; // use for picking the correct set of jit symbols given the event time
-        public MonoJitSymbol[] Symbols; // keep sorted for bsearch
+        DateTime m_DomainCreationTime; // use for picking the correct set of jit symbols given the event time
+        MonoJitSymbol[] m_Symbols; // keep sorted for bsearch
 
+        public IReadOnlyList<MonoJitSymbol> Symbols => m_Symbols;
+        
         public MonoSymbolReader(string monoPmipPath, DateTime? domainCreationTime = null)
         {
             // default to creation time of the pmip as a way to detect domain creation
             
-            DomainCreationTime = domainCreationTime ?? File.GetCreationTime(monoPmipPath);
+            m_DomainCreationTime = domainCreationTime ?? File.GetCreationTime(monoPmipPath);
             
-            // find matching unity process
-            
-            var fmatch = Regex.Match(Path.GetFileName(monoPmipPath), @"^pmip_(?<pid>\d+)_\d+\.txt$", RegexOptions.IgnoreCase);
-            if (!fmatch.Success)
-                throw new FileLoadException("Unable to extract unity PID from mono pmip filename", monoPmipPath);
-            UnityProcessId = uint.Parse(fmatch.Groups["pid"].Value);
-
             // parse pmip
             
             var lines = File.ReadAllLines(monoPmipPath);
@@ -72,9 +68,24 @@ namespace ProcMonUtils
                 entries.Add(monoJitSymbol);            
             }
             
-            Symbols = entries.OrderBy(e => e.Address.Base).ToArray();
+            m_Symbols = entries.OrderBy(e => e.Address.Base).ToArray();
         }
         
-        public MonoJitSymbol? FindSymbol(ulong address) => Symbols.FindAddressIn(address);
+        public bool TryFindSymbol(ulong address, [NotNullWhen(returnValue: true)] out MonoJitSymbol? monoJitSymbol) =>
+            m_Symbols.TryFindAddressIn(address, out monoJitSymbol);
+        
+        public static (int unityPid, int domainSerial) ParsePmipFilename(string monoPmipPath)
+        {
+            var match = Regex.Match(Path.GetFileName(monoPmipPath), @"^pmip_(?<pid>\d+)_(?<domain>\d+)\.txt$", RegexOptions.IgnoreCase);
+            
+            if (match.Success &&
+                int.TryParse(match.Groups["pid"].Value, out var pid) &&
+                int.TryParse(match.Groups["domain"].Value, out var domain))
+            {
+                return (pid, domain);
+            }
+            
+            throw new FileLoadException("Unable to extract unity PID from mono pmip filename", monoPmipPath);
+        }
     }
 }

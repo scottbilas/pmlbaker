@@ -7,7 +7,7 @@ using Shouldly;
 
 class Tests
 {
-    NPath m_PmipPath = null!, m_PmlBakedPath = null!; 
+    NPath m_PmlPath = null!, m_PmipPath = null!, m_PmlBakedPath = null!; 
     
     // crap tests just to get some basic sanity..
     
@@ -19,31 +19,48 @@ class Tests
             .ParentContaining("testdata", true)
             .DirectoryMustExist();
 
-        var pmlPath = testDataPath.Combine("basic.pml");
+        m_PmlPath = testDataPath.Combine("basic.pml");
         m_PmipPath = testDataPath.Files("pmip*.txt").Single();
-        m_PmlBakedPath = pmlPath.ChangeExtension(".pmlbaked");
-        
-        PmlUtils.Symbolicate(pmlPath, m_PmipPath, m_PmlBakedPath);
+        m_PmlBakedPath = m_PmlPath.ChangeExtension(".pmlbaked");
     }
     
-    [Test]
-    public void PmipBasics()
+    void Symbolicate(bool debugFormat)
     {
+        PmlUtils.Symbolicate(m_PmlPath, new SymbolicateOptions
+        {
+            DebugFormat = debugFormat,
+            MonoPmipPaths = new[] { m_PmipPath.ToString() },
+            BakedPath = m_PmlBakedPath
+        });
+    }
+    
+    [TestCase(true), TestCase(false)]
+    public void PmipBasics(bool debugFormat)
+    {
+        Symbolicate(debugFormat);
+
         var mono = new MonoSymbolReader(m_PmipPath);
         foreach (var symbol in mono.Symbols)
         {
-            mono.FindSymbol(symbol.Address.Base + symbol.Address.Size / 2).ShouldBe(symbol);
-            mono.FindSymbol(symbol.Address.Base).ShouldBe(symbol);
-            mono.FindSymbol(symbol.Address.End - 1).ShouldBe(symbol);
+            mono.TryFindSymbol(symbol.Address.Base + symbol.Address.Size / 2, out var sym0).ShouldBeTrue();
+            sym0.ShouldBe(symbol);
+            
+            mono.TryFindSymbol(symbol.Address.Base, out var sym1).ShouldBeTrue();
+            sym1.ShouldBe(symbol);
+            
+            mono.TryFindSymbol(symbol.Address.End - 1, out var sym2).ShouldBeTrue();
+            sym2.ShouldBe(symbol);
         }
         
-        mono.FindSymbol(mono.Symbols[0].Address.Base - 1).ShouldBeNull();
-        mono.FindSymbol(mono.Symbols[mono.Symbols.Length - 1].Address.End).ShouldBeNull();
+        mono.TryFindSymbol(mono.Symbols[0].Address.Base - 1, out var _).ShouldBeFalse();
+        mono.TryFindSymbol(mono.Symbols[^1].Address.End, out var _).ShouldBeFalse();
     }
     
-    [Test]
-    public void WriteAndParse()
+    [TestCase(true), TestCase(false)]
+    public void WriteAndParse(bool debugFormat)
     {
+        Symbolicate(debugFormat);
+
         var pmlQuery = new PmlQuery(m_PmlBakedPath);
         
         var frame = pmlQuery.GetRecordBySequence(36).Frames[2];
@@ -53,9 +70,11 @@ class Tests
         frame.Offset.ShouldBe(0x992);
     }
     
-    [Test]
-    public void Match()
+    [TestCase(true), TestCase(false)]
+    public void Match(bool debugFormat)
     {
+        Symbolicate(debugFormat);
+
         var pmlQuery = new PmlQuery(m_PmlBakedPath);
         
         // find all events where someone is calling a dotnet generic

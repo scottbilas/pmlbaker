@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -29,7 +30,8 @@ namespace ProcMonUtils
             Array.Sort(m_Modules, (a, b) => a.Address.Base.CompareTo(b.Address.Base));
         }
         
-        public PmlModule? FindModule(ulong address) => m_Modules.FindAddressIn(address);
+        public bool TryFindModule(ulong address, [NotNullWhen(returnValue: true)] out PmlModule? module) =>
+            m_Modules.TryFindAddressIn(address, out module);
     }
 
     [DebuggerDisplay("{ImagePath}")]
