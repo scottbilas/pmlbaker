@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -13,20 +14,36 @@ const string k_NtSymbolPath = "_NT_SYMBOL_PATH";
 
 string k_Usage = k_Name + $@"
 
-Bake symbols out for stack frames from a Process Monitor PML (log) file.
+Tools for baking and querying symbols from a Process Monitor Log (PML) file.
 
 Usage:
   pmlbaker bake [--debug] [--no-ntsymbolpath] [--no-symbol-download] PML
+  pmlbaker resolve PML
   pmlbaker query PMLBAKED QUERY...   
   pmlbaker (-h|--help)
   pmlbaker (-v|--version)
 
+  bake      Bake symbols from PML into <PML>.pmlbaked
+
+  resolve   Try to resolve symbols for every module found in PML. If your
+            {k_NtSymbolPath} is set to download symbols, this will preload
+            PDB's for the PML into your local symbol store.
+
+            Example {k_NtSymbolPath}:
+                srv*C:\Symbols*https://msdl.microsoft.com/download/symbols
+
+            Note that the symbol server is fairly slow to download and many
+            of the PDB's caught up in a broad capture session can be very
+            large. 
+
+  query     Run basic queries against the given PMLBAKED file.     
+
   PML       Path to the PML (Process Monitor Log) file to process. The folder
             containing this file will also be used for:
 
-              * Finding mono pmip jit log files (copy them here before Unity exits)
-              * Writing a .pmlbaked file with the same filename as PML with the
-                symbolicated data, to be used for a `query`.
+            * Finding mono pmip jit log files (copy them here before Unity exits)
+            * Writing a .pmlbaked file with the same filename as PML with the
+              symbolicated data, to be used for a `query`.
 
   PMLBAKED  Path to a .pmlbaked file (file extension optional) for running queries.
 
@@ -38,7 +55,7 @@ Options:
   --no-ntsymbolpath     Don't use {k_NtSymbolPath}
   --no-symbol-download  Strip any http* from {k_NtSymbolPath} to avoid slow downloads
   -h --help             Show this screen.
-  -v --version          Show version.
+  -v --version          Show version.x
 
 IMPORTANT: baking should be done before any DLL's are replaced, such as from a
 Windows Update or rebuilding Unity. No validation is done to ensure that DLL's
@@ -130,6 +147,49 @@ if (parsed["bake"].IsTrue)
 
     cancel = true;
     Console.WriteLine("done!");
+}
+else if (parsed["resolve"].IsTrue)
+{
+    if ((Environment.GetEnvironmentVariable(k_NtSymbolPath)?.IndexOf("http") ?? -1) == -1)
+        Console.WriteLine($"{k_NtSymbolPath} appears to be not set to use a symbol server!");  
+
+    Console.Write("Scanning call stacks for modules...");
+
+    var pmlPath = ((string)parsed["PML"].Value).ToNPath().FileMustExist();
+    var modulePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    var iter = 0;
+    using (var pmlReader = new PmlReader(pmlPath))
+    {
+        foreach (var eventStack in pmlReader.SelectEventStacks())
+        {
+            foreach (var address in eventStack.Frames)
+            {
+                if (eventStack.Process.TryFindModule(address, out var module))
+                    modulePaths.Add(module.ImagePath);
+                
+                if (iter++ % 10000000 == 0)
+                    Console.Write(".");
+            }
+        }
+    }
+    Console.WriteLine("done!");
+    
+    var dbghelp = new SimpleSymbolHandler();
+    foreach (var (modulePath, index) in modulePaths.OrderBy(_ => _).Select((p, i) => (p, b: i)))
+    {
+        var start = DateTime.Now;
+        Console.Write($"{index+1}/{modulePaths.Count} Loading symbols for {modulePath}...");
+        try
+        {
+            dbghelp.LoadModule(modulePath);
+            var delta = DateTime.Now - start;
+            Console.WriteLine($"done! ({delta.TotalSeconds:0.00}s)");
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine($"fail! {e.GetType().Name}: {e.Message}");
+        }
+    }
 }
 else if (parsed["query"].IsTrue)
 {

@@ -229,6 +229,8 @@ namespace ProcMonUtils
             }
         }
         
+        public IEnumerable<PmlProcess> Processes => m_ProcessesByPmlIndex.Values;
+
         // one instance is created per call, then updated and yielded on each iteration  
         public IEnumerable<PmlEventStack> SelectEventStacks(int startAtIndex = 0)
         {

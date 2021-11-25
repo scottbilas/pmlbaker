@@ -10,7 +10,7 @@ using NiceIO;
 namespace ProcMonUtils
 {
     // this is a cut down DebugHelp.SymbolHandler that doesn't do anything with slow exceptions 
-    class SimpleSymbolHandler : IDisposable
+    public class SimpleSymbolHandler : IDisposable
     {
         static int s_Serial;
         IntPtr m_Handle;
@@ -27,7 +27,7 @@ namespace ProcMonUtils
                 NativeLibrary.Load(dbgHelpPath);            
         }
         
-        public SimpleSymbolHandler(string? ntSymbolPath)
+        public SimpleSymbolHandler(string? ntSymbolPath = null)
         {
             m_Handle = new IntPtr(++s_Serial);
             
@@ -48,7 +48,7 @@ namespace ProcMonUtils
 
         // FUTURE: check the DLL at `imageName` against a fingerprint. We don't get a checksum in the PML, but can do the
         // next best thing at least, which is check size, version, timestamp.
-        public Win32Error LoadModule(string imageName, ulong dllBase, bool skipSymbols)
+        public Win32Error LoadModule(string imageName, ulong dllBase = 0, bool skipSymbols = false)
         {
             var flags = skipSymbols ? 0x4u /*SLMFLAG_NO_SYMBOLS*/ : 0;
             
