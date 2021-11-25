@@ -20,15 +20,17 @@ function KillProc($what) {
 function KillProcs {
     KillProc procmon
     KillProc procmon64
-    KillProc unitypackagemanager
     KillProc unity
+    KillProc unitypackagemanager
+    KillProc unity.licensing.client
     KillProc "unity hub"
 }
 
 function KillDir($where) {
     if (test-path $where) {
         if (get-command byenow) { # scoop install byenow
-            byenow --staged --delete-ntapi --one-liner --list-errors --show-bytes --yolo --yes $where
+            remove-item -r $where
+            #byenow --staged --delete-ntapi --one-liner --list-errors --show-bytes --yolo --yes $where
         }
         else {
             remove-item -r $where
@@ -134,4 +136,4 @@ Write-Host "*** Killing processes"
 KillProcs
 
 Write-Host "*** Baking"
-& $PSScriptRoot\..\builds\pmlbaker.exe bake $eventsPmlPath (get-childitem $TestDir\pmip*.txt)
+& $PSScriptRoot\..\builds\pmlbaker.exe bake $eventsPmlPath
