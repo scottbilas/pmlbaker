@@ -5,6 +5,7 @@
         <LangVersion>default</LangVersion>
         <Nullable>enable</Nullable>
         <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     </PropertyGroup>
 
     <ItemGroup>

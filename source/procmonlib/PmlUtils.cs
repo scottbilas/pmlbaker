@@ -27,9 +27,7 @@ namespace ProcMonUtils
             if (!m_SymbolsForModuleCache.Add(module.ImagePath))
                 return;
             
-            var skipSymbols = options.NoSymbolModuleNames?.Contains(module.ModuleName, StringComparer.OrdinalIgnoreCase) ?? false;
-            
-            var win32Error = m_SimpleSymbolHandler.LoadModule(module.ImagePath, module.Address.Base, skipSymbols);
+            var win32Error = m_SimpleSymbolHandler.LoadModule(module.ImagePath, module.Address.Base);
             if (win32Error != Win32Error.ERROR_SUCCESS &&
                 win32Error != Win32Error.ERROR_PATH_NOT_FOUND &&
                 win32Error != Win32Error.ERROR_NO_MORE_FILES) // this can happen if a dll has been deleted since the PML was recorded
@@ -206,10 +204,17 @@ namespace ProcMonUtils
 
                         if (module != null && symCache.TryGetNativeSymbol(address, out var nativeSymbol))
                         {
+                            var name = nativeSymbol.symbol.Name;
+                            
+                            // sometimes we get noisy symbols like Microsoft.CodeAnalysis.CommitHashAttribute..ctor(System.String)$##6000AE6
+                            var found = name.IndexOf("$##");
+                            if (found != -1)
+                                name = name[..found];
+
                             if (options.DebugFormat)
-                                sb.AppendFormat("{0} [{1}] {2} + 0x{3:x}", type, module.ModuleName, nativeSymbol.symbol.Name, nativeSymbol.offset);
+                                sb.AppendFormat("{0} [{1}] {2} + 0x{3:x}", type, module.ModuleName, name, nativeSymbol.offset);
                             else 
-                                sb.AppendFormat("{0},{1:x},{2:x},{3:x}", type, ToStringIndex(module.ModuleName), ToStringIndex(nativeSymbol.symbol.Name), nativeSymbol.offset);
+                                sb.AppendFormat("{0},{1:x},{2:x},{3:x}", type, ToStringIndex(module.ModuleName), ToStringIndex(name), nativeSymbol.offset);
                         }
                         else if (symCache.TryGetMonoSymbol(address, out var monoSymbol) && monoSymbol.AssemblyName != null && monoSymbol.Symbol != null)
                         {

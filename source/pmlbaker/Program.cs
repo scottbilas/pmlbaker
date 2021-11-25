@@ -77,9 +77,13 @@ if (!parseOk)
 
 if (parsed["bake"].IsTrue)
 {
+    // FUTURE: this eats up a ton of native memory, probably from loading and using all the PDB's and never unloading them.
+    // can probably set up some kind of LRU+pdbsize unload strategy to keep it manageable.
+    
     var cancel = false;
     string? currentModule = null;
     
+    // yuck, replace this with nice RX
     var monitor = new Thread(() =>
     {
         DateTime? lastModuleUpdateTime = DateTime.Now;
@@ -135,7 +139,6 @@ if (parsed["bake"].IsTrue)
     var iter = 0;
     PmlUtils.Symbolicate(pmlPath, new SymbolicateOptions {
         DebugFormat = parsed["--debug"].IsTrue,
-        NoSymbolModuleNames = new[] { "microsoft.ui.xaml.dll", "windows.ui.xaml.dll" }, // these hang indefinitely for me...why..? TODO: add a module preloading step that can run in another thread and be canceled on a timeout. can watch for the .error file being zero size to detect a hang (vs slow download) too. 
         NtSymbolPath = ntSymbolPath,
         ModuleLoadProgress = name => currentModule = name,
         Progress = (_, total) =>
@@ -220,8 +223,11 @@ else if (parsed["query"].IsTrue)
                 sb.Append($"    {i:00} {frame.Type.ToString()[0]}");
                 if (frame.ModuleStringIndex != 0)
                     sb.Append($" [{pmlQuery.GetString(frame.ModuleStringIndex)}]");
-                if (frame.SymbolStringIndex != 0)
-                    sb.Append($" {pmlQuery.GetString(frame.SymbolStringIndex)}");
+
+                sb.Append(frame.SymbolStringIndex != 0
+                    ? $" {pmlQuery.GetString(frame.SymbolStringIndex)} + 0x{frame.Offset:x}"
+                    : $" 0x{frame.Offset:x}");
+
                 Console.WriteLine(sb);
                 sb.Clear();
             }

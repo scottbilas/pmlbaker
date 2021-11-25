@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -48,6 +48,10 @@ namespace ProcMonUtils
             
             foreach (var evt in m_Events)
             {
+                // uninitialized events will happen when there are gaps in the sequencing 
+                if (evt.ProcessId == 0)
+                    continue;
+                
                 foreach (var frame in evt.Frames)
                 {
                     Add(m_ModulesToEvents, evt.Sequence, frame.ModuleStringIndex);

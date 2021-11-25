@@ -1,4 +1,6 @@
 ﻿using System;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace ProcMonUtils
 {
@@ -109,36 +111,102 @@ namespace ProcMonUtils
             
             return i;
         }
-        
+
         public ulong ReadULongHex()
         {
-            var i = 0ul;
+            var result = 0ul;
             var start = Offset;
             
             while (Offset < Text.Length)
             {
                 uint c = Text[Offset];
-                var old = i;
+                var old = result;
 
-                if (c >= '0' && c <= '9')
-                    i = 16*i + (c-'0');
-                else if (c >= 'a' && c <= 'f')
-                    i = 16*i + (c-'a'+10);
-                else if (c >= 'A' && c <= 'F')
-                    i = 16*i + (c-'A'+10);
+                if (c is >= '0' and <= '9')
+                    result = 16*result + (c-'0');
+                else if (c is >= 'a' and <= 'f')
+                    result = 16*result + (c-'a'+10);
+                else if (c is >= 'A' and <= 'F')
+                    result = 16*result + (c-'A'+10);
                 else
                     break;
 
-                if (i < old)
+                if (result < old)
                     throw new OverflowException($"Integer starting at offset {start} too big in line: {Text}");
                 
                 ++Offset;
             }
             
             if (start == Offset)
-                throw new SimpleParserException($"Expected uint, got {Text[start]} at offset {start} for line: {Text}");
+            {
+                throw Offset == Text.Length
+                    ? new SimpleParserException($"Expected ulong, got end of text for line: {Text}")
+                    : new SimpleParserException($"Expected uint, got {Text[Offset]} at offset {Offset} for line: {Text}");
+            }
             
-            return i;
+            return result;
         }
+        
+        /*  String.Join(", ", Enumerable.Range(0, 256).Select(i => i switch
+            {
+                >= '0' and <= '9' => i - '0',
+                >= 'a' and <= 'f' => i - 'a' + 10,
+		        >= 'A' and <= 'F' => i - 'A' + 10,
+		        _ => -1
+	        })) */
+        static readonly sbyte[] k_HexLut = {
+            -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+            -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+            -1, -1, -1, -1, -1, -1, -1,
+            10, 11, 12, 13, 14, 15,
+            -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+            10, 11, 12, 13, 14, 15,
+            -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+            -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+            -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+            -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+            -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+            -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+            -1, -1, -1, -1, -1, -1, -1, -1, -1 };
+
+        // 30% faster than ReadULongHex../shrug..
+        public unsafe ulong ReadULongHexUnsafe()
+        {
+            fixed (char* text = Text)
+            fixed (sbyte* lut = k_HexLut)
+            {
+                var result = 0ul;
+
+                var start = text + Offset; // utf8
+                var str = start;
+                
+                for (;;) // internally in .net, strings are null-terminated, so no need to check against length
+                {
+                    var digit = lut[(byte)*str]; // chop to byte to avoid needing bounds check
+                    if (digit < 0)
+                        break;
+
+                    var old = result;
+                    result = 16*result + (ulong)digit;
+
+                    if (result < old)
+                        throw new OverflowException($"Integer starting at offset {Offset} too big in line: {Text}");
+                    
+                    ++str;
+                }
+                
+                Offset += (int)(str - start);
+
+                if (start == str)
+                {
+                    throw Offset == Text.Length
+                        ? new SimpleParserException($"Expected ulong, got end of text for line: {Text}")
+                        : new SimpleParserException($"Expected ulong, got {*str} at offset {Offset} for line: {Text}");
+                }
+                
+                return result;
+            }
+        }        
     }
 }

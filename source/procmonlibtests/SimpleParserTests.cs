@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using NUnit.Framework;
 using ProcMonUtils;
 using Shouldly;
@@ -122,7 +122,7 @@ class SimpleParserTests
         new SimpleParser(text).ReadULong().ShouldBe(expected);
     }
     
-    [TestCase("", typeof(IndexOutOfRangeException))]
+    [TestCase("", typeof(SimpleParserException))]
     [TestCase("g", typeof(SimpleParserException))]
     [TestCase(";123", typeof(SimpleParserException))]
     [TestCase("10000000000000000", typeof(OverflowException))]
