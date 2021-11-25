@@ -27,7 +27,7 @@ namespace ProcMonUtils
                 NativeLibrary.Load(dbgHelpPath);            
         }
         
-        public SimpleSymbolHandler(bool noNtSymbolPath = false)
+        public SimpleSymbolHandler(string? ntSymbolPath)
         {
             m_Handle = new IntPtr(++s_Serial);
             
@@ -37,7 +37,7 @@ namespace ProcMonUtils
 
             Win32.SymSetOptions(options);
             
-            if (!Win32.SymInitialize(m_Handle, noNtSymbolPath ? "" : null, false))
+            if (!Win32.SymInitialize(m_Handle, ntSymbolPath, false))
                 throw new Win32Exception();
         }
         
@@ -46,9 +46,13 @@ namespace ProcMonUtils
             Win32.SymCleanup(m_Handle);
         }
 
-        public Win32Error LoadSymbolsForModule(string imageName, ulong dllBase)
+        // FUTURE: check the DLL at `imageName` against a fingerprint. We don't get a checksum in the PML, but can do the
+        // next best thing at least, which is check size, version, timestamp.
+        public Win32Error LoadModule(string imageName, ulong dllBase, bool skipSymbols)
         {
-            return Win32.SymLoadModuleEx(m_Handle, IntPtr.Zero, imageName, null, dllBase, 0U, IntPtr.Zero, 0U) != 0
+            var flags = skipSymbols ? 0x4u /*SLMFLAG_NO_SYMBOLS*/ : 0;
+            
+            return Win32.SymLoadModuleEx(m_Handle, IntPtr.Zero, imageName, null, dllBase, 0U, IntPtr.Zero, flags) != 0
                 ? Win32Error.ERROR_SUCCESS
                 : Win32Exception.GetLastWin32Error(); // note that a zero return but ERROR_SUCCESS after that is how SymLoadModuleEx signifies "already loaded"
         }
@@ -75,6 +79,8 @@ namespace ProcMonUtils
             public static extern ulong SymLoadModuleEx(IntPtr hProcess, IntPtr hFile, string imageName, string? moduleName, ulong baseOfDll, uint dllSize, IntPtr data, uint flags);
             [DllImport("dbghelp", SetLastError = true)]
             public static extern bool SymFromAddr(IntPtr hProcess, ulong address, out ulong displacement, ref SymbolInfo symbol);
+            [DllImport("dbghelp", SetLastError = true)]
+            public static extern bool SymGetModuleInfo(IntPtr hProcess, ulong address, ref ModuleInfo module);
         }
     }
 }

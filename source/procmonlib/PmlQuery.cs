@@ -1,7 +1,5 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Diagnostics;
-using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
@@ -26,86 +24,178 @@ namespace ProcMonUtils
     public struct FrameRecord
     {
         public FrameType Type;
-        public string Module;
-        public string Symbol;
-        public int Offset;
+        public int ModuleStringIndex;
+        public int SymbolStringIndex;
+        public ulong Offset; // will be the full address if no symbol
     }
     
     public class PmlQuery
     {
-        List<EventRecord> m_Events = new();
+        EventRecord[] m_Events;
+        List<string> m_Strings = new();
         Dictionary<DateTime, int> m_EventsByTime = new();
         Dictionary<string, List<int>> m_SymbolsToEvents = new();
         Dictionary<string, List<int>> m_ModulesToEvents = new();
 
+        enum State { Seeking, Config, Events, Strings }
+        
         public PmlQuery(string pmlBakedPath)
+        {
+            Load(pmlBakedPath);
+
+            if (m_Events == null)
+                throw new FileLoadException($"No events found in {pmlBakedPath}");
+            
+            foreach (var evt in m_Events)
+            {
+                foreach (var frame in evt.Frames)
+                {
+                    Add(m_ModulesToEvents, evt.Sequence, frame.ModuleStringIndex);
+                    Add(m_SymbolsToEvents, evt.Sequence, frame.SymbolStringIndex);
+                }
+            }
+        }
+
+        public string GetString(int stringIndex) => m_Strings[stringIndex]; 
+        
+        void Add(Dictionary<string, List<int>> dict, int eventIndex, int stringIndex)
+        {
+            var value = GetString(stringIndex);
+            if (!dict.TryGetValue(value, out var list))
+                dict.Add(value, list = new());
+            list.Add(eventIndex);
+        }
+
+        void Load(string pmlBakedPath)
         {
             var lines = File
                 .ReadLines(pmlBakedPath)
-                .Select((line, index) => (text: line.Trim(), index))
-                .Where(line => !line.text.StartsWith("#")); // filter out comments
+                .Select((text, index) => (text: text.Trim(), index + 1))
+                .Where(l => l.text.Length != 0 && l.text[0] != '#');
             
-            foreach (var line in lines)
+            var (state, currentLine) = (State.Seeking, 0);
+
+            try
             {
-                var fields = line.text.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries); // last may be empty if it's a global procmon profile/stat event
-                const int frameOffset = 3;
-                
-                var eventRecord = new EventRecord
+                foreach (var (line, index) in lines)
                 {
-                    Sequence = int.Parse(fields[0]),
-                    CaptureTime = DateTime.Parse(fields[1]),
-                    ProcessId = int.Parse(fields[2]),
-                    Frames = new FrameRecord[fields.Length - frameOffset],
-                };
-                
-                var eventIndex = m_Events.Count; 
-                m_Events.Add(eventRecord);
-                Debug.Assert(eventRecord.Sequence == eventIndex);
-
-                string Add(Dictionary<string, List<int>> dict, string value)
-                {
-                    if (!dict.TryGetValue(value, out var list))
-                        dict.Add(value, list = new());
-                    list.Add(eventIndex);
-                    return value;
-                }
-                
-                string AddSymbol(string symbol) => Add(m_SymbolsToEvents, symbol);
-                string AddModule(string module) => Add(m_ModulesToEvents, module);
-
-                for (var i = 0; i < eventRecord.Frames.Length; ++i)
-                {
-                    var match = Regex.Match(fields[i + frameOffset], @"(?nx-)
-                        ^(?<type>[A-Z])\ (
-                            (?<addr>0x[0-9a-f]+) |
-                            \[(?<module>[^\]]+)\]\ (?<symbol>.*?)\ \+\ 0x(?<offset>[0-9a-f]+)
-                        $)");
-                    if (!match.Success)
-                        throw new FileLoadException($"Line {eventIndex+1} in '{pmlBakedPath}' fails pattern match");
-
-                    var type = match.Groups["type"].Value[0] switch
-                    {
-                        'K' => FrameType.Kernel,
-                        'U' => FrameType.User,
-                        'M' => FrameType.Mono,
-                        _ => throw new ArgumentOutOfRangeException()
-                    };
+                    currentLine = index;
                     
-                    eventRecord.Frames[i] = match.Groups["addr"].Success
-                        ? new FrameRecord
+                    if (line[0] == '[')
+                    {
+                        state = line switch
                         {
-                            Type = type,
-                            Symbol = AddSymbol(match.Groups["addr"].Value),
-                        }
-                        : new FrameRecord
-                        {
-                            Type = type,
-                            Module = AddModule(match.Groups["module"].Value),
-                            Symbol = AddSymbol(match.Groups["symbol"].Value),
-                            Offset = int.Parse(match.Groups["offset"].Value, NumberStyles.HexNumber),
+                            "[Config]" => State.Config,
+                            "[Events]" => State.Events,
+                            "[Strings]" => State.Strings,
+                            _ => throw new Exception($"Not a supported section {line}")
                         };
+                        continue;
+                    }
+                    
+                    switch (state)
+                    {
+                        case State.Seeking:
+                            throw new Exception("Unexpected lines without category");
+                        
+                        case State.Config:
+                            var m = Regex.Match(line, @"(\w+)\s*=\s*(\w+)");
+                            if (!m.Success)
+                                throw new Exception($"Unexpected config format: {line}");
+                            switch (m.Groups[1].Value)
+                            {
+                                case "EventCount":
+                                    var eventCount = int.Parse(m.Groups[2].Value);
+                                    m_Events = new EventRecord[eventCount];
+                                    break;
+                                case "DebugFormat":
+                                    if (bool.Parse(m.Groups[2].Value))
+                                        throw new Exception("DebugFormat=true not supported for querying");
+                                    break;
+                                default:
+                                    throw new Exception($"Unexpected config option: {m.Groups[1].Value}");
+                            }
+                            break;
+                        
+                        case State.Events:
+                            ParseEventLine(line);
+                            break;
+                        
+                        case State.Strings:
+                            var parser = new SimpleParser(line);
+                            var stringIndex = (int)parser.ReadULongHex();
+                            if (stringIndex != m_Strings.Count)
+                                throw new InvalidOperationException("Mismatch string index");
+                            parser.Expect(':');
+                            m_Strings.Add(parser.AsSpan().ToString());
+                            break;
+                    }
                 }
             }
+            catch (Exception x)
+            {
+                throw new FileLoadException($"{pmlBakedPath}({currentLine}): {x.Message}", x);
+            }
+        }
+
+        void ParseEventLine(string line)
+        {
+            var parser = new SimpleParser(line);
+            
+            var sequence = (int)parser.ReadULongHex();
+            ref var eventRecord = ref m_Events[sequence];
+            eventRecord.Sequence = sequence;
+            parser.Expect(':');
+            
+            eventRecord.CaptureTime = DateTime.FromFileTime((long)parser.ReadULongHex());
+            m_EventsByTime[eventRecord.CaptureTime] = sequence;
+            parser.Expect(';');
+            
+            eventRecord.ProcessId = (int)parser.ReadULongHex();
+            eventRecord.Frames = new FrameRecord[parser.Count(';')];
+
+            for (var iframe = 0; iframe < eventRecord.Frames.Length; ++iframe)
+            {
+                parser.Expect(';');
+
+                var typec = parser.ReadChar();
+                var type = typec switch
+                {
+                    'K' => FrameType.Kernel,
+                    'U' => FrameType.User,
+                    'M' => FrameType.Mono,
+                    _ => throw new ArgumentOutOfRangeException($"Unknown type '{typec}' for frame {iframe}")
+                };
+                
+                parser.Expect(',');
+                var first = parser.ReadULongHex();
+
+                switch (parser.PeekCharSafe())
+                {
+                    // non-symbol frame
+                    case ';':
+                    case '\0':
+                        eventRecord.Frames[iframe] = new FrameRecord
+                            { Type = type, Offset = first, };
+                        break;
+                    
+                    // symbol frame
+                    case ',':
+                        ref var frameRecord = ref eventRecord.Frames[iframe];
+                        frameRecord.ModuleStringIndex = (int)first;
+                        parser.Advance(1); // already read
+                        frameRecord.SymbolStringIndex = (int)parser.ReadULongHex();
+                        parser.Expect(',');
+                        frameRecord.Offset = parser.ReadULongHex();
+                        break;
+                    
+                    default:
+                        throw new Exception("Parse error");
+                }
+            }
+            
+            if (!parser.AtEnd)
+                throw new Exception("Unexpected extra frames");
         }
         
         public IReadOnlyList<EventRecord> AllRecords => m_Events;

@@ -1,9 +1,12 @@
+using System;
 using System.Linq;
 using System.Text.RegularExpressions;
 using NiceIO;
 using NUnit.Framework;
 using ProcMonUtils;
 using Shouldly;
+
+// ReSharper disable StringLiteralTypo
 
 class Tests
 {
@@ -24,21 +27,19 @@ class Tests
         m_PmlBakedPath = m_PmlPath.ChangeExtension(".pmlbaked");
     }
     
-    void Symbolicate(bool debugFormat)
+    void Symbolicate()
     {
         PmlUtils.Symbolicate(m_PmlPath, new SymbolicateOptions
         {
-            DebugFormat = debugFormat,
             MonoPmipPaths = new[] { m_PmipPath.ToString() },
-            BakedPath = m_PmlBakedPath
+            BakedPath = m_PmlBakedPath,
+            NtSymbolPath = "",
         });
     }
-    
-    [TestCase(true), TestCase(false)]
-    public void PmipBasics(bool debugFormat)
-    {
-        Symbolicate(debugFormat);
 
+    [Test]
+    public void PmipBasics()
+    {
         var mono = new MonoSymbolReader(m_PmipPath);
         foreach (var symbol in mono.Symbols)
         {
@@ -52,28 +53,28 @@ class Tests
             sym2.ShouldBe(symbol);
         }
         
-        mono.TryFindSymbol(mono.Symbols[0].Address.Base - 1, out var _).ShouldBeFalse();
-        mono.TryFindSymbol(mono.Symbols[^1].Address.End, out var _).ShouldBeFalse();
+        mono.TryFindSymbol(mono.Symbols[0].Address.Base - 1, out _).ShouldBeFalse();
+        mono.TryFindSymbol(mono.Symbols[^1].Address.End, out _).ShouldBeFalse();
     }
     
-    [TestCase(true), TestCase(false)]
-    public void WriteAndParse(bool debugFormat)
+    [Test]
+    public void WriteAndParse()
     {
-        Symbolicate(debugFormat);
+        Symbolicate();
 
         var pmlQuery = new PmlQuery(m_PmlBakedPath);
         
         var frame = pmlQuery.GetRecordBySequence(36).Frames[2];
-        frame.Module.ShouldBe("FLTMGR.SYS");
+        pmlQuery.GetString(frame.ModuleStringIndex).ShouldBe("FLTMGR.SYS");
         frame.Type.ShouldBe(FrameType.Kernel);
-        frame.Symbol.ShouldBe("FltGetFileNameInformation");
-        frame.Offset.ShouldBe(0x992);
+        pmlQuery.GetString(frame.SymbolStringIndex).ShouldBe("FltGetFileNameInformation");
+        frame.Offset.ShouldBe(0x992ul);
     }
     
-    [TestCase(true), TestCase(false)]
-    public void Match(bool debugFormat)
+    [Test]
+    public void Match()
     {
-        Symbolicate(debugFormat);
+        Symbolicate();
 
         var pmlQuery = new PmlQuery(m_PmlBakedPath);
         

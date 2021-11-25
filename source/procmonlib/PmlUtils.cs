@@ -13,21 +13,23 @@ namespace ProcMonUtils
     class SymCache : IDisposable
     {
         SimpleSymbolHandler m_SimpleSymbolHandler;
-        HashSet<string> m_SymbolsForModuleCache = new(StringComparer.OrdinalIgnoreCase);
+        HashSet<string> m_SymbolsForModuleCache = new();
         Dictionary<ulong, (SymbolInfo symbol, ulong offset)> m_SymbolFromAddressCache = new();
         MonoSymbolReader? m_MonoSymbolReader;
         
         public SymCache(SymbolicateOptions options) =>
-            m_SimpleSymbolHandler = new SimpleSymbolHandler(options.NoNtSymbolPath);
+            m_SimpleSymbolHandler = new SimpleSymbolHandler(options.NtSymbolPath);
 
         public void Dispose() => m_SimpleSymbolHandler.Dispose();
 
-        public void LoadSymbolsForModule(PmlModule module)
+        public void LoadModule(PmlModule module, SymbolicateOptions options)
         {
             if (!m_SymbolsForModuleCache.Add(module.ImagePath))
                 return;
             
-            var win32Error = m_SimpleSymbolHandler.LoadSymbolsForModule(module.ImagePath, module.Address.Base);
+            var skipSymbols = options.NoSymbolModuleNames?.Contains(module.ModuleName, StringComparer.OrdinalIgnoreCase) ?? false;
+            
+            var win32Error = m_SimpleSymbolHandler.LoadModule(module.ImagePath, module.Address.Base, skipSymbols);
             if (win32Error != Win32Error.ERROR_SUCCESS &&
                 win32Error != Win32Error.ERROR_PATH_NOT_FOUND &&
                 win32Error != Win32Error.ERROR_NO_MORE_FILES) // this can happen if a dll has been deleted since the PML was recorded
@@ -77,8 +79,10 @@ namespace ProcMonUtils
         public bool DebugFormat;        // defaults to string dictionary to compact the file and improve parsing speed a bit
         public string[]? MonoPmipPaths; // defaults to looking for matching pmip's in pml folder 
         public string? BakedPath;       // defaults to <pmlname>.pmlbaked
+        public string? NtSymbolPath;    // defaults to null, which will have dbghelp use _NT_SYMBOL_PATH if exists
         public Action<int, int>? Progress;
-        public bool NoNtSymbolPath;
+        public Action<string?>? ModuleLoadProgress;
+        public string[]? NoSymbolModuleNames;
 
         public int StartAtEventIndex;
         public int EventProcessCount; // 0 means "all remaining events" 
@@ -98,10 +102,11 @@ namespace ProcMonUtils
 
             var pmlPath = inPmlPath.ToNPath();
             using var pmlReader = new PmlReader(pmlPath);
+            options.Progress?.Invoke(0, (int)pmlReader.EventCount);
 
             var symCacheDb = new Dictionary<uint /*pid*/, SymCache>();
-            var strings = new List<string>();
-            var stringDb = new Dictionary<string, int>();
+            var strings = new List<string> { "" };
+            var stringDb = new Dictionary<string, int>() { { "", 0 } };
             var badChars = new[] { '\n', '\r', '\t' };
 
             int ToStringIndex(string str)
@@ -138,36 +143,45 @@ namespace ProcMonUtils
             var tmpBakedPath = bakedPath + ".tmp";
             using (var bakedFile = File.CreateText(tmpBakedPath))
             {
-                bakedFile.Write("# EVENTS BEGIN\n");
-                bakedFile.Write("#\n");
-                bakedFile.Write($"# EventCount = {pmlReader.EventCount}\n");
-                bakedFile.Write($"# DebugFormat = {options.DebugFormat}\n");
-                bakedFile.Write("# EventDoc = Sequence;Time of Day;PID;Frame[0];Frame[1];Frame[..n]\n");
-                bakedFile.Write("# FrameDoc = $type [$module] $symbol + $offset (type: K=kernel, U=user, M=mono)\n");
-                bakedFile.Write("#\n");
+                if (options.DebugFormat)
+                {
+                    bakedFile.Write("# Events: Sequence:Time of Day;PID;Frame[0];Frame[1];Frame[..n]\n");
+                    bakedFile.Write("# Frames: $type [$module] $symbol + $offset (type: K=kernel, U=user, M=mono)\n");
+                    bakedFile.Write("\n");
+                }
+                bakedFile.Write("[Config]\n");
+                bakedFile.Write($"EventCount={pmlReader.EventCount}\n");
+                if (options.DebugFormat)
+                    bakedFile.Write($"DebugFormat={options.DebugFormat}\n");
+                bakedFile.Write("\n");
+                bakedFile.Write("[Events]\n");
                 
                 var sb = new StringBuilder();
-                var processIdFormat = options.DebugFormat ? "d" : "x";
 
                 var eventStacks = pmlReader.SelectEventStacks(options.StartAtEventIndex);
                 if (options.EventProcessCount > 0)
                     eventStacks = eventStacks.Take(options.EventProcessCount);
-                
+
                 foreach (var eventStack in eventStacks)
                 {
                     if (!symCacheDb.TryGetValue(eventStack.Process.ProcessId, out var symCache))
                         symCacheDb.Add(eventStack.Process.ProcessId, symCache = new SymCache(options));                        
-                    
-                    sb.Append(eventStack.EventIndex);
-                    sb.Append(';');
-                    if (options.DebugFormat)
-                        sb.Append(new DateTime(eventStack.CaptureTime).ToString(CaptureTimeFormat));
-                    else
-                        sb.AppendFormat("{0:x}", eventStack.CaptureTime);
-                    sb.Append(';');
-                    sb.Append(eventStack.Process.ProcessId.ToString(processIdFormat));
-                    sb.Append(';');
 
+                    if (options.DebugFormat)
+                    {
+                        sb.AppendFormat("{0}:{1};{2};",
+                            eventStack.EventIndex,
+                            new DateTime(eventStack.CaptureTime).ToString(CaptureTimeFormat),
+                            eventStack.Process.ProcessId);
+                    }
+                    else
+                    {
+                        sb.AppendFormat("{0:x}:{1:x};{2:x};",
+                            eventStack.EventIndex,
+                            eventStack.CaptureTime,
+                            eventStack.Process.ProcessId);
+                    }
+                    
                     for (var iframe = 0; iframe < eventStack.FrameCount; ++iframe)
                     {
                         var address = eventStack.Frames[iframe];
@@ -176,7 +190,9 @@ namespace ProcMonUtils
                         {
                             try
                             {
-                                symCache.LoadSymbolsForModule(module);
+                                options.ModuleLoadProgress?.Invoke(module.ModuleName);
+                                symCache.LoadModule(module, options);
+                                options.ModuleLoadProgress?.Invoke(null);
                             }
                             catch (Exception e)
                             {
@@ -191,9 +207,9 @@ namespace ProcMonUtils
                         if (module != null && symCache.TryGetNativeSymbol(address, out var nativeSymbol))
                         {
                             if (options.DebugFormat)
-                                sb.AppendFormat("{0} [{1}] {2} + 0x{3:x}", type, Path.GetFileName(module.ImagePath), nativeSymbol.symbol.Name, nativeSymbol.offset);
+                                sb.AppendFormat("{0} [{1}] {2} + 0x{3:x}", type, module.ModuleName, nativeSymbol.symbol.Name, nativeSymbol.offset);
                             else 
-                                sb.AppendFormat("{0},{1:x},{2:x},{3:x}", type, ToStringIndex(Path.GetFileName(module.ImagePath)), ToStringIndex(nativeSymbol.symbol.Name), nativeSymbol.offset);
+                                sb.AppendFormat("{0},{1:x},{2:x},{3:x}", type, ToStringIndex(module.ModuleName), ToStringIndex(nativeSymbol.symbol.Name), nativeSymbol.offset);
                         }
                         else if (symCache.TryGetMonoSymbol(address, out var monoSymbol) && monoSymbol.AssemblyName != null && monoSymbol.Symbol != null)
                         {
@@ -203,7 +219,7 @@ namespace ProcMonUtils
                                 sb.AppendFormat("M,{0:x},{1:x},{2:x}", ToStringIndex(monoSymbol.AssemblyName), ToStringIndex(monoSymbol.Symbol), address - monoSymbol.Address.Base);
                         }
                         else
-                            sb.AppendFormat("{0},{1:x}", type, address);
+                            sb.AppendFormat(options.DebugFormat ? "{0} 0x{1:x}" : "{0},{1:x}", type, address);
                     }
                     
                     sb.Append('\n');
@@ -216,25 +232,16 @@ namespace ProcMonUtils
                 foreach (var cache in symCacheDb.Values)
                     cache.Dispose();
 
-                bakedFile.Write("#\n");
-                bakedFile.Write("# EVENTS END\n");
-                bakedFile.Write("#\n");
-                
                 if (strings.Count != 0)
                 {
-                    bakedFile.Write("#\n");
-                    bakedFile.Write("# STRINGS BEGIN\n");
-                    bakedFile.Write("#\n");
+                    bakedFile.Write("\n");
+                    bakedFile.Write("[Strings]\n");
 
-                    foreach (var str in strings)
+                    foreach (var (s, i) in strings.Select((s, i) => (s, i)))
                     {
-                        bakedFile.Write(str);
+                        bakedFile.Write($"{i:x}:{s}");
                         bakedFile.Write('\n');
                     }
-                
-                    bakedFile.Write("#\n");
-                    bakedFile.Write("# STRINGS END\n");
-                    bakedFile.Write("#\n");
                 }
             }
 

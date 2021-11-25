@@ -38,11 +38,13 @@ namespace ProcMonUtils
     public class PmlModule : IAddressRange
     {
         public readonly string ImagePath;
+        public readonly string ModuleName;
         public readonly AddressRange Address;
 
         public PmlModule(string imagePath, AddressRange address)
         {
             ImagePath = imagePath;
+            ModuleName = Path.GetFileName(ImagePath);
             Address = address;
         }
         
