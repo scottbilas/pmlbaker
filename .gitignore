@@ -1,7 +1,8 @@
 .idea/
-debug/
 bin/
 obj/
+builds/debug/
+builds/ref/
 
 # keep this way until i get around to making a publishable set
 /testdata/
