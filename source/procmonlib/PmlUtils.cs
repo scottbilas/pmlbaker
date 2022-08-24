@@ -5,8 +5,8 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using BetterWin32Errors;
-using DebugHelp;
 using NiceIO;
+using DebugHelp;
 
 namespace ProcMonUtils
 {
@@ -123,18 +123,17 @@ namespace ProcMonUtils
                 return index;
             }
             
-            if (options.MonoPmipPaths != null)
+            var monoPmipPaths = options.MonoPmipPaths ?? pmlPath.Parent.Files("pmip*.txt").Select(p => p.ToString()).ToArray();
+
+            foreach (var monoPmipPath in monoPmipPaths)
             {
-                foreach (var monoPmipPath in options.MonoPmipPaths)
-                {
-                    var (pid, _) = MonoSymbolReader.ParsePmipFilename(monoPmipPath);
-                    if (symCacheDb.ContainsKey((uint)pid))
-                        throw new Exception("Multiple mono domains not supported yet");
-                    
-                    var symCache = new SymCache(options);
-                    symCache.LoadMonoSymbols(monoPmipPath);
-                    symCacheDb.Add((uint)pid, symCache);
-                }
+                var (pid, _) = MonoSymbolReader.ParsePmipFilename(monoPmipPath);
+                if (symCacheDb.ContainsKey((uint)pid))
+                    throw new Exception("Multiple mono domains not supported yet");
+                
+                var symCache = new SymCache(options);
+                symCache.LoadMonoSymbols(monoPmipPath);
+                symCacheDb.Add((uint)pid, symCache);
             }
 
             var bakedPath = options.BakedPath ?? pmlPath.ChangeExtension(".pmlbaked");
