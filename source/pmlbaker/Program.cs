@@ -112,7 +112,7 @@ if (parsed["bake"].IsTrue)
     });
     monitor.Start();
     
-    string ntSymbolPath = null;
+    string? ntSymbolPath = null;
     if (parsed["--no-ntsymbolpath"].IsTrue)
     {
         ntSymbolPath = "";

@@ -5,22 +5,26 @@ param(
     [Parameter(Mandatory=$true)]$TestDir,  # root for project and other artifacts
     [Parameter(Mandatory=$true)]$UnityDir, # path to unity build
     [string]$Template,                     # template to create project from, opens existing project if missing
-    [switch]$NukeCache                     # set to nuke the global unity cache
+    [switch]$NukeCache,                    # set to nuke the global unity cache
+    [switch]$NoSymbolDownload              # when running pmlbaker, tell it not to download pdb's via _NT_SYMBOL_PATH
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-function KillProc($what) {
+function KillProc($what, [switch]$waitAfter) {
     if (get-process -ea:silent $what) {
         pskill -nobanner $what
+        if ($waitAfter) {
+            start-sleep 1.0
+        }
     }
 }
 
 function KillProcs {
     KillProc procmon
     KillProc procmon64
-    KillProc unity
+    KillProc unity $true # give time for other apps to notice Unity died (and exit cleanly) before trying to kill them too
     KillProc unitypackagemanager
     KillProc unity.licensing.client
     KillProc "unity hub"
