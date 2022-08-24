@@ -68,7 +68,9 @@ class Tests
         pmlQuery.GetString(frame.ModuleStringIndex).ShouldBe("FLTMGR.SYS");
         frame.Type.ShouldBe(FrameType.Kernel);
         pmlQuery.GetString(frame.SymbolStringIndex).ShouldBe("FltGetFileNameInformation");
-        frame.Offset.ShouldBe(0x992ul);
+        
+        // TODO: this is unstable; as the OS gets updated, offsets change..
+        frame.Offset.ShouldBe(0x752ul);
     }
     
     [Test]
